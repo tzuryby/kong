@@ -25,8 +25,8 @@ env:
   global:
     - LUAROCKS=3.0.4
     - OPENSSL=1.1.1b
-    - OPENRESTY_BASE=1.13.6.2
-    - OPENRESTY_LATEST=1.13.6.2
+    - OPENRESTY_BASE=1.15.8.1rc2
+    - OPENRESTY_LATEST=1.15.8.1rc2
     - OPENRESTY=$OPENRESTY_BASE
     - DOWNLOAD_ROOT=$HOME/download-root
     - INSTALL_CACHE=$HOME/install-cache
