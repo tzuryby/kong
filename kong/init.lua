@@ -115,45 +115,21 @@ local TLS_SCHEMES = {
 }
 
 
-local configured_plugins
-local loaded_plugins
+local plugins
 local schema_state
 
 
-local function sort_plugins_for_execution(kong_conf, db, plugin_list)
-  -- sort plugins by order of execution
-  table.sort(plugin_list, function(a, b)
-    local priority_a = a.handler.PRIORITY or 0
-    local priority_b = b.handler.PRIORITY or 0
-    return priority_a > priority_b
-  end)
+local function execute_plugins(ctx, phase)
+  local phase_plugins = plugins.phases[phase]
+  for plugin, configuration in plugins_iterator(ctx, phase, plugins) do
+    if phase_plugins[plugin.name] then
+      kong_global.set_named_ctx(kong, "plugin", configuration)
+      kong_global.set_namespaced_log(kong, plugin.name)
 
-  -- add reports plugin if not disabled
-  if kong_conf.anonymous_reports then
-    local reports = require "kong.reports"
+      plugin.handler[phase](plugin.handler, configuration)
 
-    reports.configure_ping(kong_conf)
-    reports.add_ping_value("database_version", db.infos.db_ver)
-    reports.toggle(true)
-
-    plugin_list[#plugin_list+1] = {
-      name = "reports",
-      handler = reports,
-    }
-  end
-end
-
-
-local function execute_plugins(ctx, phase, load_configuration)
-  for plugin, plugin_conf in plugins_iterator(ctx, loaded_plugins,
-    configured_plugins,
-    load_configuration) do
-    kong_global.set_named_ctx(kong, "plugin", plugin_conf)
-    kong_global.set_namespaced_log(kong, plugin.name)
-
-    plugin.handler[phase](plugin.handler, plugin_conf)
-
-    kong_global.reset_log(kong)
+      kong_global.reset_log(kong)
+    end
   end
 end
 
@@ -167,8 +143,8 @@ local function flush_delayed_response(ctx)
   end
 
   kong.response.exit(ctx.delayed_response.status_code,
-    ctx.delayed_response.content,
-    ctx.delayed_response.headers)
+                     ctx.delayed_response.content,
+                     ctx.delayed_response.headers)
 end
 
 
@@ -286,10 +262,6 @@ function Kong.init()
     mesh.init()
   end
 
-  -- Load plugins as late as possible so that everything is set up
-  loaded_plugins = assert(db.plugins:load_plugin_schemas(config.loaded_plugins))
-  sort_plugins_for_execution(config, db, loaded_plugins)
-
   runloop.init.after()
 
   db:close()
@@ -377,10 +349,14 @@ function Kong.init_worker()
   -- run plugins init_worker context
 
 
-  for _, plugin in ipairs(loaded_plugins) do
-    kong_global.set_namespaced_log(kong, plugin.name)
-    plugin.handler:init_worker()
-    kong_global.reset_log(kong)
+  plugins = runloop.get_plugins()
+  local phase_plugins = plugins.phases.init_worker
+  for _, plugin in ipairs(plugins.loaded) do
+    if phase_plugins[plugin.name] then
+      kong_global.set_namespaced_log(kong, plugin.name)
+      plugin.handler:init_worker()
+      kong_global.reset_log(kong)
+    end
   end
 end
 
@@ -392,8 +368,8 @@ function Kong.ssl_certificate()
 
   runloop.certificate.before(ctx)
 
-  configured_plugins = runloop.get_plugins()
-  execute_plugins(ctx, "certificate", true)
+  plugins = runloop.get_plugins()
+  execute_plugins(ctx, "certificate")
 end
 
 
@@ -507,8 +483,8 @@ function Kong.rewrite()
   -- we're just using the iterator, as in this rewrite phase no consumer nor
   -- route will have been identified, hence we'll just be executing the global
   -- plugins
-  configured_plugins = runloop.get_plugins()
-  execute_plugins(ctx, "rewrite", true)
+  plugins = runloop.get_plugins()
+  execute_plugins(ctx, "rewrite")
 
   runloop.rewrite.after(ctx)
 end
@@ -521,8 +497,8 @@ function Kong.preread()
 
   runloop.preread.before(ctx)
 
-  configured_plugins = runloop.get_plugins()
-  execute_plugins(ctx, "preread", true)
+  plugins = runloop.get_plugins()
+  execute_plugins(ctx, "preread")
 
   runloop.preread.after(ctx)
 end
@@ -537,13 +513,13 @@ function Kong.access()
 
   ctx.delay_response = true
 
-  for plugin, plugin_conf in plugins_iterator(ctx, loaded_plugins,
-                                              configured_plugins, true) do
-    if not ctx.delayed_response then
-      kong_global.set_named_ctx(kong, "plugin", plugin_conf)
+  local phase_plugins = plugins.phases.access
+  for plugin, configuration in plugins_iterator(ctx, "access", plugins) do
+    if not ctx.delayed_response and phase_plugins[plugin.name] then
+      kong_global.set_named_ctx(kong, "plugin", configuration)
       kong_global.set_namespaced_log(kong, plugin.name)
 
-      local err = coroutine.wrap(plugin.handler.access)(plugin.handler, plugin_conf)
+      local err = coroutine.wrap(plugin.handler.access)(plugin.handler, configuration)
 
       kong_global.reset_log(kong)
 
@@ -607,9 +583,9 @@ function Kong.handle_error()
 
   ctx.KONG_UNEXPECTED = true
 
-  if not ctx.plugins_for_request then
-    configured_plugins = runloop.get_plugins()
-    for _ in plugins_iterator(ctx, loaded_plugins, configured_plugins, true) do
+  if not ctx.plugins then
+    plugins = runloop.get_plugins()
+    for _ in plugins_iterator(ctx, "content", plugins) do
       -- just build list of plugins
     end
   end

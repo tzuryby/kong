@@ -18,11 +18,10 @@ local balancer     = require "kong.runloop.balancer"
 local mesh         = require "kong.runloop.mesh"
 local constants    = require "kong.constants"
 local singletons   = require "kong.singletons"
-local certificate  = require "kong.runloop.certificate"
 local concurrency  = require "kong.concurrency"
 local declarative  = require "kong.db.declarative"
 local certificate  = require "kong.runloop.certificate"
-local ngx_re       = require "ngx.re"
+local BasePlugin   = require "kong.plugins.base_plugin"
 
 
 local kong         = kong
@@ -77,6 +76,7 @@ local NOTICE       = ngx.NOTICE
 local SERVER_HEADER = meta._SERVER_TOKENS
 local CACHE_OPTS = { ttl = 0 }
 local SUBSYSTEMS = constants.PROTOCOLS_WITH_SUBSYSTEM
+local HEADERS = constants.HEADERS
 local EMPTY_T = {}
 local WORKER_ID
 
@@ -97,6 +97,7 @@ local plugins_semaphore
 local _set_rebuild_plugins
 
 
+local loaded_plugins
 local declarative_entities
 
 
@@ -564,6 +565,30 @@ local function init_worker()
 end
 
 
+local function sort_plugins(plugins)
+  -- sort plugins by order of execution
+  sort(plugins, function(a, b)
+    local priority_a = a.handler.PRIORITY or 0
+    local priority_b = b.handler.PRIORITY or 0
+    return priority_a > priority_b
+  end)
+
+  -- add reports plugin if not disabled
+  if kong.configuration.anonymous_reports then
+    local reports = require "kong.reports"
+
+    reports.configure_ping(kong.configuration)
+    reports.add_ping_value("database_version", kong.db.infos.db_ver)
+    reports.toggle(true)
+
+    plugins[#plugins +1] = {
+      name = "reports",
+      handler = reports,
+    }
+  end
+end
+
+
 do
   local router_version
   local plugins_version
@@ -858,9 +883,30 @@ do
     end
 
     local new_plugins = {
-      map = {},
-      cache = {},
+      map    = {},
+      cache  = {},
+      loaded = loaded_plugins,
+      combos = {},
     }
+
+    if subsystem == "stream" then
+      new_plugins.phases = {
+        init_worker = {},
+        preread     = {},
+        log         = {},
+      }
+
+    else
+      new_plugins.phases = {
+        init_worker   = {},
+        certificate   = {},
+        rewrite       = {},
+        access        = {},
+        header_filter = {},
+        body_filter   = {},
+        log           = {},
+      }
+    end
 
     local counter = 0
 
@@ -894,9 +940,36 @@ do
 
         local cache_key = kong.db.plugins:cache_key(plugin)
         new_plugins.cache[cache_key] = plugin
+
+        local combo_key = (plugin.route    and 1 or 0)
+                        + (plugin.service  and 2 or 0)
+                        + (plugin.consumer and 4 or 0)
+
+        new_plugins.combos[combo_key] = true
+
+        if not new_plugins.combos[plugin.name] then
+          new_plugins.combos[plugin.name] = {}
+        end
+
+        new_plugins.combos[plugin.name][combo_key] = true
       end
 
       counter = counter + 1
+    end
+
+    for _, plugin in ipairs(loaded_plugins) do
+      if new_plugins.combos[plugin.name] then
+        for phase_name, phase in pairs(new_plugins.phases) do
+          if plugin.handler[phase_name] ~= BasePlugin[phase_name] then
+            phase[plugin.name] = true
+          end
+        end
+
+      else
+        if plugin.handler.init_worker ~= BasePlugin.init_worker then
+          new_plugins.phases.init_worker[plugin.name] = true
+        end
+      end
     end
 
     plugins_version = version
@@ -1081,11 +1154,14 @@ return {
   end,
 
   -- exported for unit-testing purposes only
-  _set_rebuild_router = _set_rebuild_router,
+  _set_rebuild_router  = _set_rebuild_router,
   _set_rebuild_plugins = _set_rebuild_plugins,
 
   init = {
     after = function()
+      loaded_plugins = assert(kong.db.plugins:load_plugin_schemas(kong.configuration.loaded_plugins))
+      sort_plugins(loaded_plugins)
+
       if kong.configuration.database == "off" then
         local err
         declarative_entities, err = parse_declarative_config()
@@ -1589,8 +1665,8 @@ return {
         header["Trailer"] = nil
       end
 
-      local upstream_status_header = constants.HEADERS.UPSTREAM_STATUS
-      if singletons.configuration.enabled_headers[upstream_status_header] then
+      local upstream_status_header = HEADERS.UPSTREAM_STATUS
+      if kong.configuration.enabled_headers[upstream_status_header] then
         header[upstream_status_header] = tonumber(sub(var.upstream_status or "", -3))
         if not header[upstream_status_header] then
           log(ERR, "failed to set ", upstream_status_header, " header")
