@@ -963,7 +963,7 @@ end
 
 
 function DAO:post_crud_event(operation, entity, old_entity, options)
-  if options and options.quiet then
+  if options and options.broadcast_crud_event == false then
     return
   end
 
