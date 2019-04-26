@@ -144,6 +144,20 @@ local function sort_plugins_for_execution(kong_conf, db, plugin_list)
 end
 
 
+local function execute_plugins(ctx, phase, load_configuration)
+  for plugin, plugin_conf in plugins_iterator(ctx, loaded_plugins,
+    configured_plugins,
+    load_configuration) do
+    kong_global.set_named_ctx(kong, "plugin", plugin_conf)
+    kong_global.set_namespaced_log(kong, plugin.name)
+
+    plugin.handler[phase](plugin.handler, plugin_conf)
+
+    kong_global.reset_log(kong)
+  end
+end
+
+
 local function flush_delayed_response(ctx)
   ctx.delay_response = false
 
@@ -153,9 +167,16 @@ local function flush_delayed_response(ctx)
   end
 
   kong.response.exit(ctx.delayed_response.status_code,
-                     ctx.delayed_response.content,
-                     ctx.delayed_response.headers)
+    ctx.delayed_response.content,
+    ctx.delayed_response.headers)
 end
+
+
+-- Kong public context handlers.
+-- @section kong_handlers
+
+
+local Kong = {}
 
 
 function Kong.init()
@@ -372,12 +393,7 @@ function Kong.ssl_certificate()
   runloop.certificate.before(ctx)
 
   configured_plugins = runloop.get_plugins()
-  for plugin, plugin_conf in plugins_iterator(ctx, loaded_plugins,
-                                              configured_plugins, true) do
-    kong_global.set_namespaced_log(kong, plugin.name)
-    plugin.handler:certificate(plugin_conf)
-    kong_global.reset_log(kong)
-  end
+  execute_plugins(ctx, "certificate", true)
 end
 
 
@@ -492,15 +508,7 @@ function Kong.rewrite()
   -- route will have been identified, hence we'll just be executing the global
   -- plugins
   configured_plugins = runloop.get_plugins()
-  for plugin, plugin_conf in plugins_iterator(ctx, loaded_plugins,
-                                              configured_plugins, true) do
-    kong_global.set_named_ctx(kong, "plugin", plugin_conf)
-    kong_global.set_namespaced_log(kong, plugin.name)
-
-    plugin.handler:rewrite(plugin_conf)
-
-    kong_global.reset_log(kong)
-  end
+  execute_plugins(ctx, "rewrite", true)
 
   runloop.rewrite.after(ctx)
 end
@@ -514,15 +522,7 @@ function Kong.preread()
   runloop.preread.before(ctx)
 
   configured_plugins = runloop.get_plugins()
-  for plugin, plugin_conf in plugins_iterator(ctx, loaded_plugins,
-                                              configured_plugins, true) do
-    kong_global.set_named_ctx(kong, "plugin", plugin_conf)
-    kong_global.set_namespaced_log(kong, plugin.name)
-
-    plugin.handler:preread(plugin_conf)
-
-    kong_global.reset_log(kong)
-  end
+  execute_plugins(ctx, "preread", true)
 
   runloop.preread.after(ctx)
 end
@@ -572,15 +572,7 @@ function Kong.header_filter()
 
   runloop.header_filter.before(ctx)
 
-  for plugin, plugin_conf in plugins_iterator(ctx, loaded_plugins,
-                                              configured_plugins) do
-    kong_global.set_named_ctx(kong, "plugin", plugin_conf)
-    kong_global.set_namespaced_log(kong, plugin.name)
-
-    plugin.handler:header_filter(plugin_conf)
-
-    kong_global.reset_log(kong)
-  end
+  execute_plugins(ctx, "header_filter")
 
   runloop.header_filter.after(ctx)
 end
@@ -591,15 +583,7 @@ function Kong.body_filter()
 
   local ctx = ngx.ctx
 
-  for plugin, plugin_conf in plugins_iterator(ctx, loaded_plugins,
-                                              configured_plugins) do
-    kong_global.set_named_ctx(kong, "plugin", plugin_conf)
-    kong_global.set_namespaced_log(kong, plugin.name)
-
-    plugin.handler:body_filter(plugin_conf)
-
-    kong_global.reset_log(kong)
-  end
+  execute_plugins(ctx, "body_filter")
 
   runloop.body_filter.after(ctx)
 end
@@ -610,15 +594,7 @@ function Kong.log()
 
   local ctx = ngx.ctx
 
-  for plugin, plugin_conf in plugins_iterator(ctx, loaded_plugins,
-                                              configured_plugins) do
-    kong_global.set_named_ctx(kong, "plugin", plugin_conf)
-    kong_global.set_namespaced_log(kong, plugin.name)
-
-    plugin.handler:log(plugin_conf)
-
-    kong_global.reset_log(kong)
-  end
+  execute_plugins(ctx, "log")
 
   runloop.log.after(ctx)
 end
