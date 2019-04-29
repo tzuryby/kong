@@ -168,14 +168,48 @@ local function load_declarative_config()
 end
 
 
+local function prewarm_hostname(premature, hostname)
+  if premature then
+    return
+  end
+
+  kong.dns.toip(hostname)
+end
+
+
+local function prewarm_hostnames(premature, hostnames, len)
+  if premature then
+    return
+  end
+
+  log(DEBUG, "prewarming dns client on worker #", WORKER_ID, "...")
+  for i = 1, len do
+    prewarm_hostname(premature, hostnames[i])
+  end
+  log(DEBUG, "prewarming dns client on worker #", WORKER_ID, " done")
+end
+
+
 local function cache_services()
   if not kong.db or not kong.cache then
     return true
   end
 
+  local hostnames = {}
+  local hostnames_len = 0
+  local visited = {}
+  local service_host
+
   for service, err in kong.db.services:each(1000) do
     if err then
       return nil, err
+    end
+
+    service_host = service.host
+    if not visited[service_host] and hostname_type(service_host) == "name" then
+      hostnames_len = hostnames_len + 1
+      hostnames[hostnames_len] = service_host
+      visited[service_host] = true
     end
 
     local cache_key = kong.db.services:cache_key(service)
@@ -185,6 +219,10 @@ local function cache_services()
     if err then
       return nil, err
     end
+  end
+
+  if hostnames_len > 0 then
+    timer_at(0, prewarm_hostnames, hostnames, hostnames_len)
   end
 
   return true
@@ -296,6 +334,13 @@ local function register_events()
       -- only allowed because no Route is pointing to it anymore.
       log(DEBUG, "[events] Service updated, invalidating router")
       cache:invalidate("router:version")
+    end
+
+    if data.operation == "create" or
+       data.operation == "update" then
+      if hostname_type(data.entity.host) == "name" then
+        timer_at(0, prewarm_hostname, data.entity.host)
+      end
     end
   end, "crud", "services")
 
