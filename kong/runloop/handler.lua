@@ -48,6 +48,8 @@ local subsystem    = ngx.config.subsystem
 local start_time   = ngx.req.start_time
 local clear_header = ngx.req.clear_header
 local starttls     = ngx.req.starttls -- luacheck: ignore
+local sleep        = ngx.sleep
+local worker_id    = ngx.worker.id
 local unpack       = unpack
 
 
@@ -55,6 +57,7 @@ local ERR          = ngx.ERR
 local INFO         = ngx.INFO
 local WARN         = ngx.WARN
 local CRIT         = ngx.CRIT
+local NOTICE       = ngx.NOTICE
 local DEBUG        = ngx.DEBUG
 local ERROR        = ngx.ERROR
 
@@ -64,6 +67,8 @@ local SUBSYSTEMS = constants.PROTOCOLS_WITH_SUBSYSTEM
 local EMPTY_T = {}
 local TTL_ZERO = { ttl = 0 }
 local REBUILD_TIMEOUT
+local WORKER_ID
+local MAX_REBUILD_ATTEMPTS = 5
 
 
 local get_plugins_iterator, get_updated_plugins_iterator
@@ -383,38 +388,57 @@ local function get_rebuild_timeout()
 end
 
 
+local function get_version(name)
+  if not kong.cache then
+    return "init"
+  end
+
+  local version, err = kong.cache:get(name .. ":version", TTL_ZERO, utils.uuid)
+  if err then
+    return nil, "could not ensure " .. name .. " is up to date: " .. err
+  end
+
+  return version
+end
+
+
 local rebuild
 do
 
-  local function get_version(name)
-    if not kong.cache then
-      return "init"
+  local function safe_rebuild(name, callback, version, max_attempts)
+    local action = version == "init" and "initializing " .. name
+                                     or  "rebuilding" .. name
+
+    local worker_id_str = WORKER_ID and " (worker id: " .. WORKER_ID .. ")" or ""
+
+    local check_for_versions = max_attempts > 1
+
+    for attempt = 1, max_attempts do
+      log(DEBUG, action, ". Attempt ", attempt, "/", max_attempts, worker_id_str)
+
+      local pok, ok, err = pcall(callback, version, check_for_versions)
+      if pok and ok then
+        log(DEBUG, action, " succeded.", worker_id_str)
+        return true
+      end
+
+      log(NOTICE, action, "failed: ", err, worker_id_str)
+      if attempt < max_attempts then -- don't sleep after the last iteration
+        sleep(0.01 * attempt * attempt)
+      end
     end
 
-    local version, err = kong.cache:get(name .. ":version", TTL_ZERO, utils.uuid)
-    if err then
-      return nil, "could not ensure " .. name .. " is up to date: " .. err
-    end
-
-    return version
+    return nil, fmt("%s failed %d times, aborting", action, max_attempts)
   end
 
 
-  local function safe_rebuild(callback, version)
-    local pok, ok, err = pcall(callback, version)
-    if not pok or not ok then
-      return nil, "could not rebuild synchronously: " .. tostring(ok or err)
-    end
-    return true
-  end
-
-
-  local function rebuild_timer(premature, callback, version, semaphore)
+  local function rebuild_timer(premature, name, callback,
+                               version, semaphore, max_attempts)
     if premature then
       semaphore:post()
       return
     end
-    local ok, err = safe_rebuild(callback, version)
+    local ok, err = safe_rebuild(name, callback, version, max_attempts)
     if not ok then
       log(CRIT, err)
     end
@@ -422,8 +446,8 @@ do
   end
 
 
-  local function rebuild_async(callback, version, semaphore)
-    local ok, err = timer_at(0, rebuild_timer, callback, version, semaphore)
+  local function rebuild_async(name, callback, version, semaphore, max_attempts)
+    local ok, err = timer_at(0, rebuild_timer, name, callback, version, semaphore)
     if not ok then
       return nil, "could not create rebuild timer: " .. err
     end
@@ -432,18 +456,18 @@ do
   end
 
 
-
   -- @param name "router" or "plugins_iterator"
   -- @param callback A function that will update either the router or plugins_iterator
   -- @param version target version
   -- @param semaphore router_semaphore or plugins_iterator_semaphore
   -- @param timeout how much time to wait when trying to acquire the semaphore.
+  -- @param max_attempts how many times should the rebuild be tried before aborting
   -- @returns true if safe_rebuild was either successfully executed synchronously,
   -- enqueued via async timer, or not needed (because current_version == target).
   -- nil otherwise (safe_rebuild was neither called successfully nor enqueued,
   -- or an error happened).
   -- @returns error message as a second return value in case of failure/error
-  rebuild = function(name, callback, version, semaphore, timeout)
+  rebuild = function(name, callback, version, semaphore, timeout, max_attempts)
     local current_version, err = get_version(name)
     if not current_version then
       return nil, err
@@ -468,12 +492,12 @@ do
     end
 
     if timeout > 0 then
-      local ok, err = safe_rebuild(name, callback, current_version)
+      local ok, err = safe_rebuild(name, callback, current_version, max_attempts)
       semaphore:post()
       return ok, err
 
     else
-      ok, err = rebuild_async(callback, current_version, semaphore)
+      ok, err = rebuild_async(name, callback, current_version, semaphore, max_attempts)
       if not ok then
         semaphore:post()
         return nil, err
@@ -481,9 +505,6 @@ do
       return true
     end
   end
-
-
-
 end
 
 
@@ -492,8 +513,8 @@ do
   local plugins_iterator
 
 
-  build_plugins_iterator = function(version)
-    local new_iterator, err = PluginsIterator.new(version)
+  build_plugins_iterator = function(version, check_for_versions)
+    local new_iterator, err = PluginsIterator.new(version, check_for_versions)
     if not new_iterator then
       return nil, err
     end
@@ -502,7 +523,7 @@ do
   end
 
 
-  update_plugins_iterator = function()
+  update_plugins_iterator = function(check_for_versions)
     local version, err = kong.cache:get("plugins_iterator:version", TTL_ZERO, utils.uuid)
     if err then
       return nil, "failed to retrieve plugins iterator version: " .. err
@@ -512,7 +533,7 @@ do
       return true
     end
 
-    local ok, err = build_plugins_iterator(version)
+    local ok, err = build_plugins_iterator(version, check_for_versions)
     if not ok then
       return nil, "error found when building plugins iterator: " .. err
     end
@@ -521,18 +542,22 @@ do
   end
 
 
-  rebuild_plugins_iterator = function(timeout)
+  rebuild_plugins_iterator = function(timeout, max_attempts)
     local version = plugins_iterator and plugins_iterator.version
     return rebuild("plugins", update_plugins_iterator,
-                   version, plugins_iterator_semaphore, timeout)
+                   version, plugins_iterator_semaphore, timeout, max_attempts)
   end
 
 
   get_updated_plugins_iterator = function()
-    local ok, err = rebuild_plugins_iterator(REBUILD_TIMEOUT)
+    local ok, err = rebuild_plugins_iterator(REBUILD_TIMEOUT, 1)
     if not ok then
       -- If an error happens while updating, log it and return non-updated version
-      log(CRIT, "error while updating plugins iterator: ", err)
+      if err == "timeout" then
+        log(NOTICE, "failed to acquire semaphore while updating plugins iterator")
+      else
+        log(CRIT, "error while updating plugins iterator: ", err)
+      end
     end
     return plugins_iterator
   end
@@ -639,7 +664,8 @@ do
     return service
   end
 
-  build_router = function(version)
+
+  build_router = function(version, check_for_versions)
     local db = kong.db
     local routes, i = {}, 0
 
@@ -655,9 +681,17 @@ do
       end
     end
 
+    local counter = 0
     for route, err in db.routes:each(1000) do
       if err then
         return nil, "could not load routes: " .. err
+      end
+
+      if check_for_versions and counter % 1000 then
+        local current_version = get_version("router")
+        if version ~= current_version then
+          return nil, "router version updated while rebuilding"
+        end
       end
 
       if should_process_route(route) then
@@ -688,6 +722,7 @@ do
         i = i + 1
         routes[i] = r
       end
+      counter = counter + 1
     end
 
     sort(routes, function(r1, r2)
@@ -720,7 +755,7 @@ do
   end
 
 
-  update_router = function()
+  update_router = function(check_for_versions)
     local version, err = kong.cache:get("router:version",
                                         CACHE_ROUTER_OPTS,
                                         utils.uuid)
@@ -733,7 +768,7 @@ do
       return true
     end
 
-    local ok, err = build_router(version)
+    local ok, err = build_router(version, check_for_versions)
     if not ok then
       return nil, "error found when building router: " .. err
     end
@@ -747,8 +782,9 @@ do
   end
 
 
-  rebuild_router = function(timeout)
-    return rebuild("router", update_router, router_version, router_semaphore, timeout)
+  rebuild_router = function(timeout, max_attempts)
+    return rebuild("router", update_router, router_version, router_semaphore,
+                   timeout, max_attempts)
   end
 
 
@@ -854,6 +890,7 @@ return {
   init_worker = {
     before = function()
       REBUILD_TIMEOUT = get_rebuild_timeout()
+      WORKER_ID = worker_id()
       reports.init_worker()
       update_lua_mem(true)
 
@@ -878,11 +915,11 @@ return {
       timer_every(1, function(premature)
         -- Don't wait for the semaphore (timeout = 0) when updating via the timer
         -- If the semaphore is locked, that means that the rebuild is already ongoing
-        local ok, err = rebuild_router(0)
+        local ok, err = rebuild_router(0, MAX_REBUILD_ATTEMPTS)
         if not ok and error ~= "timeout" then -- ignore semaphore timeout
           log(ERR, "failure while rebuilding router via timer: ", err)
         end
-        ok, err = rebuild_plugins_iterator(0)
+        ok, err = rebuild_plugins_iterator(0, MAX_REBUILD_ATTEMPTS)
         if not ok and error ~= "timeout" then -- ignore semaphore timeout
           log(ERR, "failure while rebuilding plugins_iterator via timer: ", err)
         end
@@ -911,7 +948,7 @@ return {
   },
   preread = {
     before = function(ctx)
-      local ok, err = rebuild_router(REBUILD_TIMEOUT)
+      local ok, err = rebuild_router(REBUILD_TIMEOUT, 1)
       if not ok then
         log(ERR, "no router to route connection (reason: " .. err .. ")")
         return exit(500)
@@ -1010,7 +1047,7 @@ return {
     before = function(ctx)
       -- router for Routes/Services
 
-      local ok, err = rebuild_router(REBUILD_TIMEOUT)
+      local ok, err = rebuild_router(REBUILD_TIMEOUT, 1)
 
       if not ok then
         kong.log.err("no router to route request (reason: " .. tostring(err) ..  ")")

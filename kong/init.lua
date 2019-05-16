@@ -216,7 +216,7 @@ local function load_declarative_config(kong_config, entities)
 
   if not kong_config.declarative_config then
     -- no configuration yet, just build empty plugins iterator
-    local ok, err = runloop.build_plugins_iterator(utils.uuid())
+    local ok, err = runloop.build_plugins_iterator(utils.uuid(), false)
     if not ok then
       error("error building initial plugins iterator: " .. err)
     end
@@ -240,12 +240,12 @@ local function load_declarative_config(kong_config, entities)
     kong.log.notice("declarative config loaded from ",
                     kong_config.declarative_config)
 
-    ok, err = runloop.build_plugins_iterator(utils.uuid())
+    ok, err = runloop.build_plugins_iterator(utils.uuid(), false)
     if not ok then
       error("error building initial plugins iterator: " .. err)
     end
 
-    assert(runloop.build_router("init"))
+    assert(runloop.build_router("init", false))
 
     mesh.init()
 
@@ -388,7 +388,7 @@ function Kong.init()
       error("error building initial plugins: " .. tostring(err))
     end
 
-    assert(runloop.build_router("init"))
+    assert(runloop.build_router("init", false))
   end
 
   db:close()
