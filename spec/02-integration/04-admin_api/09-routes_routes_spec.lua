@@ -200,11 +200,11 @@ for _, strategy in helpers.each_strategy() do
                 name    = "schema violation",
                 message = unindent([[
                   schema violation
-                  (must set one of 'methods', 'hosts', 'paths' when 'protocols' is 'http' or 'https')
+                  (must set one of 'methods', 'hosts', 'paths', 'snis' when 'protocols' is 'http' or 'https')
                 ]], true, true),
                 fields = {
                   ["@entity"] = {
-                    "must set one of 'methods', 'hosts', 'paths' when 'protocols' is 'http' or 'https'"
+                    "must set one of 'methods', 'hosts', 'paths', 'snis' when 'protocols' is 'http' or 'https'"
                   }
                 }
               }, cjson.decode(body))
@@ -710,11 +710,11 @@ for _, strategy in helpers.each_strategy() do
                   name    = "schema violation",
                   message = unindent([[
                   schema violation
-                  (must set one of 'methods', 'hosts', 'paths' when 'protocols' is 'http' or 'https')
+                  (must set one of 'methods', 'hosts', 'paths', 'snis' when 'protocols' is 'http' or 'https')
                 ]], true, true),
                   fields  = {
                     ["@entity"] = {
-                      "must set one of 'methods', 'hosts', 'paths' when 'protocols' is 'http' or 'https'"
+                      "must set one of 'methods', 'hosts', 'paths', 'snis' when 'protocols' is 'http' or 'https'"
                     }
                   }
                 }, cjson.decode(body))

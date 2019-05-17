@@ -862,10 +862,23 @@ describe("routes schema", function()
     describe("'snis' matching attribute", function()
       local s = { id = "a4fbd24e-6a52-4937-bd78-2536713072d2" }
 
-      it("accepts valid SNIs", function()
+      it("accepts valid SNIs for stream Routes", function()
         for _, sni in ipairs({ "example.org", "www.example.org" }) do
           local route = Routes:process_auto_fields({
             protocols = { "tcp", "tls" },
+            snis = { sni },
+            service = s,
+          }, "insert")
+          local ok, errs = Routes:validate(route)
+          assert.is_nil(errs)
+          assert.truthy(ok)
+        end
+      end)
+
+      it("accepts valid SNIs for https Routes", function()
+        for _, sni in ipairs({ "example.org", "www.example.org" }) do
+          local route = Routes:process_auto_fields({
+            protocols = { "http", "https" },
             snis = { sni },
             service = s,
           }, "insert")
@@ -894,7 +907,7 @@ describe("routes schema", function()
         end
       end)
 
-      it("rejects specifying 'snis' if 'protocols' does not have 'tls'", function()
+      it("rejects specifying 'snis' if 'protocols' does not have 'https' or 'tls'", function()
         local route = Routes:process_auto_fields({
           protocols = { "tcp" },
           snis = { "example.org" },
@@ -904,7 +917,7 @@ describe("routes schema", function()
         assert.falsy(ok)
         assert.same({
           ["@entity"] = {
-            "'snis' can only be set when 'protocols' is 'tls'",
+            "'snis' can only be set when 'protocols' is 'https' or 'tls'",
           },
           snis = "length must be 0",
         }, errs)
@@ -940,7 +953,7 @@ describe("routes schema", function()
         assert.falsy(ok)
         assert.same({
           ["@entity"] = {
-            "must set one of 'methods', 'hosts', 'paths' when 'protocols' is 'http' or 'https'"
+            "must set one of 'methods', 'hosts', 'paths', 'snis' when 'protocols' is 'http' or 'https'"
           }
         }, errs)
       end

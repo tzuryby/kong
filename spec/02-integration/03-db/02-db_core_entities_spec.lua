@@ -347,11 +347,11 @@ for _, strategy in helpers.each_strategy() do
             strategy = strategy,
             message  = unindent([[
               schema violation
-              (must set one of 'methods', 'hosts', 'paths' when 'protocols' is 'http' or 'https')
+              (must set one of 'methods', 'hosts', 'paths', 'snis' when 'protocols' is 'http' or 'https')
             ]], true, true),
             fields   = {
               ["@entity"] = {
-                "must set one of 'methods', 'hosts', 'paths' when 'protocols' is 'http' or 'https'",
+                "must set one of 'methods', 'hosts', 'paths', 'snis' when 'protocols' is 'http' or 'https'",
               }
             },
 
@@ -802,11 +802,11 @@ for _, strategy in helpers.each_strategy() do
               strategy    = strategy,
               message  = unindent([[
                 schema violation
-                (must set one of 'methods', 'hosts', 'paths' when 'protocols' is 'http' or 'https')
+                (must set one of 'methods', 'hosts', 'paths', 'snis' when 'protocols' is 'http' or 'https')
               ]], true, true),
               fields   = {
                 ["@entity"] = {
-                  "must set one of 'methods', 'hosts', 'paths' when 'protocols' is 'http' or 'https'",
+                  "must set one of 'methods', 'hosts', 'paths', 'snis' when 'protocols' is 'http' or 'https'",
                 }
               },
             }, err_t)
@@ -852,11 +852,11 @@ for _, strategy in helpers.each_strategy() do
               strategy    = strategy,
               message  = unindent([[
                 schema violation
-                (must set one of 'methods', 'hosts', 'paths' when 'protocols' is 'http' or 'https')
+                (must set one of 'methods', 'hosts', 'paths', 'snis' when 'protocols' is 'http' or 'https')
               ]], true, true),
               fields   = {
                 ["@entity"] = {
-                  "must set one of 'methods', 'hosts', 'paths' when 'protocols' is 'http' or 'https'",
+                  "must set one of 'methods', 'hosts', 'paths', 'snis' when 'protocols' is 'http' or 'https'",
                 }
               },
             }, err_t)
